@@ -1,0 +1,272 @@
+---
+title: "Data Acquisition and Management Final Project"
+author: "Ellen Kim"
+date: "`r Sys.Date()`"
+output: openintro::lab_report
+---
+
+```{r load-packages, message=FALSE}
+library(tidyverse)
+library(openintro)
+library (readr)
+library(GGally)
+library(InformationValue) 
+library(randomForest)
+library(caret)
+library(pROC) 
+library(ggplot2)
+library(ggthemes) 
+library(wesanderson)
+```
+
+# Obtain Data
+
+## Data Source 1: Kaggle
+
+```{r}
+# dataset 1: Kaggle speed dating 
+kaggle_raw <- read_csv('/Users/ellenkim/CUNY/stats_probability/DAT606_statsAndProb/project/speedDating.csv')
+
+# dataset 2: Average income based on zipcode 
+irs_raw <- read_csv('irs.csv')
+```
+
+
+# Scrub Data 
+
+Not all attributes of the dataset are relevant to our goal in determining which factors influence partner selecction. We will just select demographic information about the participant, including iid (the primary key of the first data set), gender, zipcode, age, race, and the attributes the user was evaluated on by their partner. The attributes will be investigated to determine which traits are most important when selecting a partner. The other demographic attributes will later be inputs for our data model. When our target variable (dec_o) equals 1, this indicates that the partner selected 'yes' and chose their match. 
+
+```{r}
+# select subset of attributes
+# establish parsimony
+
+df1 <- kaggle_raw %>%
+    select(iid, match,gender, zipcode, age, samerace, starts_with("pf_o_"), ends_with("_o") )
+
+df1 <- df1 %>%
+  rename(dec_bool = dec_o,
+        user_id  = iid 
+         )
+
+# Remove rows with incomplete data.
+df2 <- na.omit(df1)
+```
+
+
+  
+# Explore Data
+
+Before each date, participants are asked to evaluate their personal preference by allocating weights to each attributes. Whats interesting about these attributes is that we can measure if their stated preferences are consistent with their actions? If the user states that sincerity holds a lot of weight in pursuing a second date, do the people they choose have high marks in sincerity?
+
+##### Which did people say was most important?
+Participants had to attribute weights to the level of importance for each attribute they look for in a partner. The weights must equal 100. Below is a summation of all the weights by characteristic. The EDA seems to suggest that men prioritize attractiveness in females as the most significant factor of preferance in a partner. Women also rank attractiveness as an important factor of partner selection (3rd most important). However, what is interesting is that for men, the difference between first priority (attractiveness) to their second (intellect) is ~25%. 
+
+```{r}
+# function turn bools into gender strings  
+boolToGender <- function(gender_num){ 
+  if(gender_num == 0){
+    'female'}
+  else if(gender_num == 1){
+    'male'}
+  }
+
+# apply to dataframe column, 1 for rows/2 for columns, function
+df2$gender_bool <- apply(df2[,'gender'], 1, boolToGender) 
+
+df2 %>%
+  select(gender_bool, starts_with("pf_o_")) %>%
+    gather(key = 'attr_name', value = 'attribute_score',starts_with("pf_o_")) %>%
+      group_by(gender_bool, attr_name) %>%
+          summarize(sum_score = mean(attribute_score) ) %>%
+            ggplot(aes(x=attr_name, y=sum_score, fill=gender_bool))+
+              geom_bar(stat="identity", position=position_dodge())
+```
+ 
+If we observe the stated preferences by gender, we see a difference in ranking by attribute. For men, the top three females attributes  by priority are attractiveness, intellect, and fun. Women ranked the top three male attributes as intellect, sincerity, and attractiveness. 
+
+```{r}
+
+male_pf <- df2 %>%
+  select(gender_bool, starts_with("pf_o_")) %>%
+    filter(gender_bool == 'male') %>%
+    gather(key = 'attr_name', value = 'attribute_score',starts_with("pf_o_")) %>%
+      group_by(gender_bool, attr_name) %>%
+          summarize(sum_score = sum(attribute_score) ) %>%
+            ggplot(aes(x=reorder(attr_name, -sum_score), y=sum_score, fill=gender_bool))+
+              geom_bar(stat="identity", position=position_dodge()) +  scale_fill_manual(values=c("#E69F00"))  
+
+female_pf <- df2 %>%
+  select(gender_bool, starts_with("pf_o_")) %>%
+    filter(gender_bool == 'female') %>%
+    gather(key = 'attr_name', value = 'attribute_score',starts_with("pf_o_")) %>%
+      group_by(gender_bool, attr_name) %>%
+          summarize(sum_score = sum(attribute_score) ) %>%
+            ggplot(aes(x=reorder(attr_name, -sum_score), y=sum_score, fill=gender_bool)) +
+              geom_bar(stat="identity", position=position_dodge()) + scale_fill_manual(values=c("#56B4E9"))
+                    
+require(gridExtra)
+grid.arrange(male_pf, female_pf, ncol=1)
+ 
+```
+
+
+# Statistical Data 
+
+
+### What is the average score for each attribute by gender? 
+Here we can see that intellect and sincerity are top scoring attributes. However, even if these are generally the strengths of the participants, how much does this work to their advantage? If this is their strength, we could expect that it would play a role in partner selection.
+
+```{r}
+
+
+# Data transformation from wide to long 
+gender_dec <- 
+  df2 %>% 
+    select(gender_bool,  attr_o, sinc_o, intel_o, fun_o, amb_o, shar_o) %>%
+      gather(key = 'attr_name', value = 'attribute_score', ends_with("_o")) %>%
+        group_by(gender_bool, attr_name) %>%
+          summarize(avg_score = mean(attribute_score)) %>%
+            ggplot(aes(x=attr_name, y=avg_score, fill=gender_bool))+
+              geom_bar(stat="identity", position=position_dodge()) 
+
+gender_dec  
+```
+
+### What is the average score for each attribute by decision? 
+
+Here we can see that intellect and sincerity are top scoring attributes for partners that choose 'yes'. Whats more interesting in this statistical metric is not which attributes have a positive affect, as much as the attributes that have a negative affect. Here we can see that intelligence and sincerity are again the highest scoring attributes of members who are selecting 'yes' to their date. 
+
+
+```{r}
+boolToYesNo <- function(YesNoBool){ 
+  if(YesNoBool == 0){
+    'No'}
+  else if(YesNoBool == 1){
+    'Yes'}
+}
+
+df2$dec_yes <- apply(df2[,'dec_bool'], 1, boolToYesNo) 
+
+# Data transformation from wide to long 
+by_dec <- 
+  df2 %>% 
+    select(dec_yes, attr_o, sinc_o, intel_o, fun_o, amb_o, shar_o)  %>%
+      gather(key = 'attr_name', value = 'attribute_score', ends_with("_o")) %>%
+        group_by(dec_yes, attr_name) %>%
+          summarize(dec_count = mean(attribute_score)) %>%
+            ggplot(aes(x=attr_name, y=dec_count, fill= dec_yes)) +
+              geom_bar(stat="identity", position=position_dodge()) + scale_fill_manual(values=c("#56B4E9", "#E69F00"))
+
+by_dec  
+```
+
+
+### Zipcode Analysis
+Is there a correlation between a person's zipcode and whether they're selected for a second date? With the second dataset left merged to the original data, we are able to investigate the average income by zipcode. When we look at the supplemental income dataset, we can see that people who come from zipcodes with higher average income get more dates. The hypothesis here is that people from a zipcode where the average income is higher, will have more resources to better education which will affect their intellect score, more discretionary income to appear more attractive, and more ambition can be a product of exposure to high socio-economic status.
+ 
+
+```{r}
+# Remove zipcodes that equal 0 from the irs set
+df_irs <- irs_raw[!(irs_raw$ZIPCODE==0 ),]
+
+# select subset of income data
+df_irs <-
+  df_irs %>%
+    select(ZIPCODE, 'Avg total income') %>%
+      rename(avg_income = 'Avg total income')
+
+# merge speed dating and irs zipcode dataset
+df_income <- merge(x = df2, y = df_irs, by.x ="zipcode", by.y="ZIPCODE", all.x = TRUE, incomparables = NA)
+
+df_income <- na.omit(df_income)
+ 
+dec_income <- df_income %>%
+  group_by(dec_yes) %>%
+    summarize(avgIncome = mean(avg_income))
+
+
+ggplot(dec_income, aes(x=dec_yes, y=avgIncome, fill=dec_yes))  +
+  geom_bar(stat="identity",  position=position_dodge()) + scale_fill_manual(values=wes_palette(n=3, name="FantasticFox1"))
+```
+
+Is there an observable difference between genders when it comes to average income? The first thing to note is the average income of the zipcodes for women is significantly lower than for men. There is also an observable difference within the same gender group. Men from zipcodes with higher average income tend to get more dates than men from zipcodes with lower average income. 
+
+
+```{r}
+dec_income_gender <- df_income %>%
+  group_by(dec_yes, gender) %>%
+    summarize(avgIncome = mean(avg_income))
+   
+
+dec_income_gender$gender_str <- apply(dec_income_gender[,'gender'], 1, boolToGender) 
+
+ggplot(dec_income_gender, aes(x=gender_str, y=avgIncome, fill=dec_yes)) +
+  geom_bar(stat="identity", position=position_dodge()) +  scale_fill_manual(values=c("#E69F00", "#56B4E9"))
+
+```
+ 
+# Model Data
+Using the attributes of the dataset, we fit a model and try to predict if a user would choose a second date with their partner. First we will create training and test datatsets. The training dataset will contain 75% of the data and the remaining 25% will be used for testing. 
+```{r}
+table(df2$dec_yes)
+ 
+#Create Training and Test Sets
+
+## 75% of the sample size
+smp_size <- floor(0.75 * nrow(df2))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(df2)), size = smp_size)
+
+train <- df2[train_ind, ]
+test <- df2[-train_ind, ]
+
+```
+
+### Model: Logistic Regression
+Using the 6 attributes and gender, we will try to predict if a partner will go on a second date. 
+
+```{r}
+# Fit general  logistic model using test dataset
+log_fit <- glm(dec_bool ~ gender + attr_o + sinc_o + intel_o + fun_o + amb_o + shar_o , data=train, family=binomial(link="logit"))
+
+# Predict using test model
+log_probs <- predict(log_fit, newdata = test, type = "response" )
+
+# Convert probabilities to binary
+log_pred <- ifelse(log_probs > 0.5, 1, 0)
+
+# does avg incomoe help?
+log_fit <- glm(dec_bool ~ gender + attr_o + sinc_o + intel_o + fun_o + amb_o + shar_o , data=train, family=binomial(link="logit"))
+
+# Predict using test model
+log_probs <- predict(log_fit, newdata = test, type = "response" )
+
+# Convert probabilities to binary
+log_pred <- ifelse(log_probs > 0.5, 1, 0)
+ 
+```
+
+
+### Model: Interpret Results
+With a general logistic regression, we can predict with 76% acccuracy if a participant will accept or reject a second date with their partner. 
+  
+```{r}
+ 
+# Show accuracy matrix
+table(log_pred, test$dec_bool)
+
+# How many were correctly labeled
+mean(log_pred == test$dec_bool)
+```
+
+# Conclusion 
+In conclusion, this research shows that the attribute that is most important to partner selection differs by gender. For males, the 3 important attribute is attractiveness, then intelligence, and fun. However, for women, the two 3 attributes were intelligence, sincerity, and attractiveness. Whats more, the supplemental dataset shows that average salary by zipcode is also an indicative measure of getting more dates. We can only infer why zipcode matters. However, my guess is that zipcode provides some information about a person's socio-economic status. Their status will also affect their ability to get resources to become a more attractive mate.With just these attributes we could fit a logistic regression and predict with 76% accuracy whether a participant will or will not get a second date. 
+
+
+
+
+
+
+ 
